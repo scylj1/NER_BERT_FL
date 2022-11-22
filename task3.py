@@ -73,8 +73,10 @@ unique_tags = set(tag for doc in train_tags for tag in doc)
 tag2id = {tag: id for id, tag in enumerate(unique_tags)}
 id2tag = {id: tag for tag, id in tag2id.items()}
 
-from transformers import DistilBertTokenizerFast
-tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-cased')
+from transformers import DistilBertTokenizerFast, RobertaTokenizerFast,BertTokenizerFast
+tokenizer = BertTokenizerFast.from_pretrained('bert-base-cased')
+#tokenizer = RobertaTokenizerFast.from_pretrained('roberta-large',add_prefix_space=True)
+#tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-cased')
 train_encodings = tokenizer(train_texts, is_split_into_words=True, return_offsets_mapping=True, padding=True, truncation=True)
 val_encodings = tokenizer(val_texts, is_split_into_words=True, return_offsets_mapping=True, padding=True, truncation=True)
 test_encodings = tokenizer(test_texts, is_split_into_words=True, return_offsets_mapping=True, padding=True, truncation=True)
@@ -126,9 +128,96 @@ test_dataset = WNUTDataset(test_encodings, test_labels)
 train_data_size = len(train_dataset)
 val_data_size = len(val_dataset)
 
-from transformers import DistilBertForTokenClassification
-model = DistilBertForTokenClassification.from_pretrained('distilbert-base-cased', num_labels=len(unique_tags))
+import torch.nn as nn
+from torch import ones, log, sum, rand_like, cuda
+from transformers import BertPreTrainedModel, BertModel,BertForTokenClassification
+from transformers.modeling_outputs import TokenClassifierOutput
+class BertForMultiLabelClassification(BertPreTrainedModel):
+    def __init__(self, config, pos_weight = None, focal_loss = False, gamma=2, linear_dropout_prob = 0.5):
+        super().__init__(config)
+        self.num_labels = config.num_labels
+        self.bert = BertModel(config, add_pooling_layer=False)
+        self.batch_norm = nn.BatchNorm1d(config.hidden_size)
+        self.dropout = nn.Dropout(linear_dropout_prob)
+        self.classifier = nn.Linear(config.hidden_size, self.config.num_labels)
+        self.pos_weight = self.init_pos_weight(pos_weight)
+        self.loss_fct = nn.CrossEntropyLoss()
+        self.loss_fct_focal = self.init_focal_loss(focal_loss, gamma, self.pos_weight)
+        
+        self.init_weights()
 
+    def forward(self, input_ids=None, attention_mask=None, token_type_ids=None,
+            position_ids=None, head_mask=None, inputs_embeds=None, labels=None):
+
+        outputs = self.bert(input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids,
+            position_ids=position_ids, head_mask=head_mask, inputs_embeds=inputs_embeds)
+
+        # Apply classifier to encoder representation
+        sequence_output = self.dropout(outputs[0])
+        logits = self.classifier(sequence_output)
+
+        if labels is not None:
+            if self.loss_fct_focal is not None:
+                #print(logits.view(-1, self.num_labels))
+                #print(labels.view(-1))
+                loss = self.loss_fct_focal(logits.view(-1, self.num_labels), labels.view(-1))
+                #print(loss)
+            else:
+                loss = self.loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+
+        return TokenClassifierOutput(loss=loss, logits=logits, 
+                                    hidden_states=outputs.hidden_states,
+                                    attentions=outputs.attentions)
+    
+    def init_pos_weight(self, pos_weight):
+        if(pos_weight == None or pos_weight.shape[0] != self.num_labels):
+            return None
+        return pos_weight.cuda() if cuda.is_available() else pos_weight
+
+    def init_focal_loss(self, focal_loss, gamma, pos_weight):
+        if focal_loss:
+            return FocalLoss(gamma,  pos_weight)
+        else: 
+            focal_loss = None
+        
+    
+class FocalLoss(nn.Module):
+    """Multi-class Focal loss implementation"""
+    def __init__(self, gamma=2, weight=None, reduction='mean', ignore_index=-100):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.weight = weight
+        self.ignore_index = ignore_index
+        self.reduction = reduction
+
+    def forward(self, input, target):
+        log_pt = torch.log_softmax(input, dim=1)
+        #print(log_pt)
+        pt = torch.exp(log_pt)
+        #print((1 - pt) ** self.gamma)        
+        #print(pt)
+        log_pt = (1 - pt) ** self.gamma * log_pt       
+        loss = torch.nn.functional.nll_loss(log_pt, target, self.weight, reduction=self.reduction, ignore_index=self.ignore_index)
+        #print(loss)
+           
+        return loss
+
+from transformers import AutoTokenizer
+my_model_name = "bert-base-cased"
+
+from transformers import AutoConfig
+#会覆盖掉原来的默认值配置
+my_config = AutoConfig.from_pretrained(my_model_name,num_labels=len(unique_tags),id2label=id2tag, label2id=tag2id)
+
+
+from transformers import DistilBertForTokenClassification, RobertaForTokenClassification, BertForTokenClassification, DataCollatorForTokenClassification
+data_collator = DataCollatorForTokenClassification(tokenizer)
+#model = DistilBertForTokenClassification.from_pretrained('distilbert-base-cased', num_labels=len(unique_tags))
+#model = BertForTokenClassification.from_pretrained('bert-base-cased', num_labels=len(unique_tags))
+#model = RobertaForTokenClassification.from_pretrained('roberta-large', num_labels=len(unique_tags))
+device = torch.device('cuda')
+
+model = (BertForMultiLabelClassification.from_pretrained(my_model_name, config=my_config, focal_loss=False, pos_weight=torch.tensor([0.36, 6.21, 12.44])))
 
 import numpy as np
 def align_predictions(predictions, label_ids):
@@ -154,10 +243,36 @@ def compute_metrics(eval_pred):
     return {"accuracy": accuracy_score(y_true, y_pred), "precision": precision_score(y_true, y_pred), "recall": recall_score(y_true, y_pred), "f1": f1_score(y_true, y_pred)}
 
 from transformers import DistilBertForSequenceClassification, Trainer, TrainingArguments
+from torch import nn
+class CustomTrainer(Trainer):
+    def compute_loss(self, model, inputs, return_outputs=False):
+        #print(inputs)
+        labels = inputs.get("labels")
+        #print(labels)
+        # forward pass
+        #model = model.to(torch.device('cuda'))
+        #model.cuda()
+        outputs = model(**inputs)
+        #print(outputs)
+        logits = outputs.get("logits")
+        #print(logits)
+        #print(logits.view(-1, self.model.config.num_labels))
+        #print(labels.view(-1))
+        softmax_func=nn.Softmax(dim=1)
+        soft_output=softmax_func(logits.view(-1, self.model.config.num_labels))
+        print('soft_output:\n',soft_output)
+        logpt = torch.gather(soft_output, dim=1, index=labels.view(-1, 1))  # 取出每个样本在类别标签位置的log_softmax值, shape=(bs, 1)
+        logpt = logpt.view(-1)  # 降维，shape=(bs)
+        # compute custom loss (suppose one has 3 labels with different weights)
+        #loss_fct = nn.CrossEntropyLoss(weight=torch.tensor([0.36, 6.92, 11.28]).to(device))
+        loss_fct = nn.CrossEntropyLoss()
+        #loss_fct = nn.CrossEntropyLoss(weight=torch.tensor([0.36, 6.21, 12.44]).to(device))
+        loss = loss_fct(logits.view(-1, self.model.config.num_labels), labels.view(-1))
+        return (loss, outputs) if return_outputs else loss
 
 training_args = TrainingArguments(
     output_dir='./results',          # output directory
-    num_train_epochs=5,              # total number of training epochs
+    num_train_epochs=2,              # total number of training epochs
     learning_rate=2e-5,
     per_device_train_batch_size=64,  # batch size per device during training
     per_device_eval_batch_size=64,   # batch size for evaluation
@@ -167,19 +282,19 @@ training_args = TrainingArguments(
     disable_tqdm=False,
     logging_dir='./logs',            # directory for storing logs
     logging_steps=10,
-    seed=4921,
+    seed=3407,
     
 )
 
-#model = DistilBertForSequenceClassification.from_pretrained("distilbert-base-uncased")
-
-trainer = Trainer(
-    model=model,                         # the instantiated 🤗 Transformers model to be trained
+#trainer = CustomTrainer(  
+trainer =  Trainer(
+    model=model,                        # the instantiated 🤗 Transformers model to be trained
     args=training_args,                  # training arguments, defined above
     compute_metrics=compute_metrics,
     train_dataset=train_dataset,         # training dataset
     eval_dataset=val_dataset,             # evaluation dataset
-    tokenizer=tokenizer
+    tokenizer=tokenizer,
+    #data_collator=data_collator,
 )
 
 trainer.train()
@@ -188,141 +303,18 @@ trainer.evaluate()
 
 #model.save_pretrained("./model/%s-%sepoch" % ('distilbert', 20))
 
-res = trainer.predict(test_dataset).metrics["test_f1"]
-print(res)
+res = trainer.predict(test_dataset) #.metrics["test_f1"]
+y_pred, y_true = align_predictions(res.predictions,res.label_ids)
 
-'''
-from transformers import AutoModelForTokenClassification, TrainingArguments, Trainer
+#print(y_pred)
+bio_preds = []
+for y in y_pred:
+    for p in y:
+        bio_preds.append(p)
 
-model = AutoModelForTokenClassification.from_pretrained('./model/distilbert-5epoch')
-
-if __name__ == '__main__':
-    
-    
-    input_tensor = tokenizer(test_texts[1], is_split_into_words=True, padding=True, truncation=True,
-                             return_offsets_mapping=True, max_length=512, return_tensors="pt")
-    input_tokens = input_tensor.tokens()
-    offsets = input_tensor["offset_mapping"]
-    ignore_mask = offsets[0, :, 1] == 0
-    # print(input_tensor)
-    input_tensor.pop("offset_mapping")  # 不剔除的话会报错
-    outputs = model(**input_tensor)
-    probabilities = torch.nn.functional.softmax(outputs.logits, dim=-1)[0].tolist()
-    predictions = outputs.logits.argmax(dim=-1)[0].tolist()
-    print(predictions)
-    results = []
-
-    tokens = input_tensor.tokens()
-    idx = 0
-    while idx < len(predictions):
-        if ignore_mask[idx]:
-            idx += 1
-            continue
-        pred = predictions[idx]
-        label = model.config.id2label[pred]
-        print(label)
-        if label != "O":
-            # 不加B-或者I-
-            label = label[2:]
-            start = idx
-            end = start + 1
-            # 获取所有token I-label
-            all_scores = []
-            all_scores.append(probabilities[start][predictions[start]])
-            while (
-                    end < len(predictions)
-                    and model.config.id2label[predictions[end]] == f"I-{label}"
-            ):
-                all_scores.append(probabilities[end][predictions[end]])
-                end += 1
-                idx += 1
-            # 得到是他们平均的
-            score = np.mean(all_scores).item()
-            word = input_tokens[start:end]
-            results.append(
-                {
-                    "entity_group": label,
-                    "score": score,
-                    "word": word,
-                    "start": start,
-                    "end": end,
-                }
-            )
-        idx += 1
-    for i in range(len(results)):
-        print(results[i])'''
-
-'''
-from torch.utils.data import DataLoader
-from transformers import DistilBertForSequenceClassification, AdamW
-
-device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-print(device)
-
-#model = DistilBertForSequenceClassification.from_pretrained('distilbert-base-uncased')
-model.to(device)
-
-
-train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=16, shuffle=True)
-
-optim = AdamW(model.parameters(), lr=5e-5)
-
-# 设置训练网络的一些参数
-# 记录训练的次数
-total_train_step = 0
-# 记录测试的次数
-total_test_step = 0
-
-from torch.utils.tensorboard import SummaryWriter
-# 添加tensorboard
-writer = SummaryWriter("/home/ljiang/NER_MTL/logs_train")
-
-for epoch in range(3):
-    print("-------第 {} 轮训练开始-------".format(epoch+1))
-    model.train()
-    for batch in train_loader:
-        optim.zero_grad()
-        input_ids = batch['input_ids'].to(device)
-        attention_mask = batch['attention_mask'].to(device)
-        labels = batch['labels'].to(device)
-        outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
-        loss = outputs[0]
-        loss.backward()
-        optim.step()
-
-        total_train_step = total_train_step + 1
-        if total_train_step % 100 == 0:
-            print("训练次数：{}, Loss: {}".format(total_train_step, loss.item()))
-            writer.add_scalar("train_loss", loss.item(), total_train_step)
-
-    torch.save(model, "model_{}.pth".format(epoch))
-    print("模型已保存")
-
-    # 测试步骤开始
-    print("evaluation")
-    model.eval()
-    total_test_loss = 0
-    total_accuracy = 0
-    with torch.no_grad():
-        for batch in val_loader:
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            labels = batch['labels'].to(device)
-            outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
-            loss = outputs[0]
-
-            total_test_loss = total_test_loss + loss.item()
-                            
-            accuracy = (outputs.argmax(1) == labels).sum()
-            total_accuracy = total_accuracy + accuracy
-                
-        print("整体测试集上的Loss: {}".format(total_test_loss))
-        print("整体测试集上的正确率: {}".format(total_accuracy/val_data_size))
-        writer.add_scalar("test_loss", total_test_loss, total_test_step)
-        writer.add_scalar("test_accuracy", total_accuracy/val_data_size, total_test_step)
-        total_test_step = total_test_step + 1
-
-        torch.save(model, "model_{}.pth".format(epoch))
-        print("模型已保存")
-writer.close() '''
+test = test.dropna()
+test['prediction'] = bio_preds
+print(test.describe())
+print(test['prediction'].value_counts())
+print(res.metrics["test_f1"])
+test.to_csv('test2.txt', sep='\t', index=False)
