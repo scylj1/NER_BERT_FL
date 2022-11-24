@@ -41,7 +41,7 @@ def tokens2sequences(txt_in,istest=False):
   if istest:  # looking ahead: the test set doesn't have labels
     txt_seqs = txt.groupby(['sequence_num'],as_index=False)[['token']].agg(lambda x: list(x))
   else:  # the dev and training sets do have labels
-    txt_seqs = txt.groupby(['sequence_num'],as_index=False)[['token', 'bio_only']].agg(lambda x: list(x))
+    txt_seqs = txt.groupby(['sequence_num'],as_index=False)[['token', 'label']].agg(lambda x: list(x))
   return txt_seqs
 
 print("This cell takes a little while to run: be patient :)")
@@ -61,7 +61,7 @@ def read_wnut(file):
     for num in range (len(file['sequence_num'])):
         
         token_docs.append(file['token'][num])
-        tag_docs.append(file['bio_only'][num])
+        tag_docs.append(file['label'][num])
 
     return token_docs, tag_docs
 
@@ -74,6 +74,40 @@ unique_tags = set(tag for doc in train_tags for tag in doc)
 tag2id = {tag: id for id, tag in enumerate(unique_tags)}
 id2tag = {id: tag for tag, id in tag2id.items()}
 
+import torch.nn.functional as F
+from torch.autograd import Variable
+'''
+class FocalLoss(torch.nn.Module):
+    def __init__(self, gamma=2, alpha=None, size_average=True):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+        if isinstance(alpha,(float,int,float)): self.alpha = torch.Tensor([alpha,1-alpha])
+        if isinstance(alpha,list): self.alpha = torch.Tensor(alpha)
+        self.size_average = size_average
+
+    def forward(self, input, target):
+        if input.dim()>2:
+            input = input.view(input.size(0),input.size(1),-1)  # N,C,H,W => N,C,H*W
+            input = input.transpose(1,2)    # N,C,H*W => N,H*W,C
+            input = input.contiguous().view(-1,input.size(2))   # N,H*W,C => N*H*W,C
+        target = target.view(-1,1)
+
+        logpt = F.log_softmax(input)
+        logpt = logpt.gather(1,target)
+        logpt = logpt.view(-1)
+        pt = Variable(logpt.data.exp())
+
+        if self.alpha is not None:
+            if self.alpha.type()!=input.data.type():
+                self.alpha = self.alpha.type_as(input.data)
+            at = self.alpha.gather(0,target.data.view(-1))
+            logpt = logpt * Variable(at)
+
+        loss = -1 * (1-pt)**self.gamma * logpt
+        if self.size_average: return loss.mean()
+        else: return loss.sum()'''
+
 epoch = 10
 myseeds = [3407, 42, 522, 227, 2]
 
@@ -83,9 +117,9 @@ for myseed in myseeds:
     num_epoch = 1
     
     from transformers import DistilBertTokenizerFast, RobertaTokenizerFast,BertTokenizerFast
-    #tokenizer = BertTokenizerFast.from_pretrained('bert-base-cased')
+    tokenizer = BertTokenizerFast.from_pretrained('bert-base-cased')
     #tokenizer = RobertaTokenizerFast.from_pretrained('roberta-large',add_prefix_space=True)
-    tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-cased')
+    #tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-cased')
     train_encodings = tokenizer(train_texts, is_split_into_words=True, return_offsets_mapping=True, padding=True, truncation=True)
     val_encodings = tokenizer(val_texts, is_split_into_words=True, return_offsets_mapping=True, padding=True, truncation=True)
     test_encodings = tokenizer(test_texts, is_split_into_words=True, return_offsets_mapping=True, padding=True, truncation=True)
@@ -185,7 +219,7 @@ for myseed in myseeds:
 
         def init_focal_loss(self, focal_loss, gamma, pos_weight):
             if focal_loss:
-                return FocalLoss(gamma,  pos_weight)
+                return FocalLoss(gamma, pos_weight)
             else: 
                 focal_loss = None
             
@@ -209,8 +243,16 @@ for myseed in myseeds:
             loss = torch.nn.functional.nll_loss(log_pt, target, self.weight, reduction=self.reduction, ignore_index=self.ignore_index)
             #print(loss)
             
+            ''' 
+            #loss_fct = nn.CrossEntropyLoss()
+            loss_fct = nn.CrossEntropyLoss(weight=self.weight,ignore_index=self.ignore_index)
+            celoss = loss_fct(input,target)
+            log_pt=-celoss
+            pt = torch.exp(log_pt)
+            loss=(1 - pt) ** self.gamma * celoss'''
             return loss
 
+    
     from transformers import AutoTokenizer
     my_model_name = "bert-base-cased"
 
@@ -221,12 +263,12 @@ for myseed in myseeds:
 
     from transformers import DistilBertForTokenClassification, RobertaForTokenClassification, BertForTokenClassification, DataCollatorForTokenClassification
     data_collator = DataCollatorForTokenClassification(tokenizer)
-    model = DistilBertForTokenClassification.from_pretrained('distilbert-base-cased', num_labels=len(unique_tags))
+    #model = DistilBertForTokenClassification.from_pretrained('distilbert-base-cased', num_labels=len(unique_tags))
     #model = BertForTokenClassification.from_pretrained('bert-base-cased', num_labels=len(unique_tags))
     #model = RobertaForTokenClassification.from_pretrained('roberta-large', num_labels=len(unique_tags))
     device = torch.device('cuda')
 
-    #model = (BertForMultiLabelClassification.from_pretrained(my_model_name, config=my_config, focal_loss=False)) #pos_weight=torch.tensor([0.36, 6.21, 12.44])
+    model = (BertForMultiLabelClassification.from_pretrained(my_model_name, config=my_config, focal_loss=False )) #pos_weight=torch.tensor([0.143, 0.952, 1.905])
 
     import numpy as np
     def align_predictions(predictions, label_ids):
@@ -251,7 +293,7 @@ for myseed in myseeds:
         #print(y_pred[0:10])
         #print(y_true[0:10])
         global num_epoch
-        alist = ['distilbert',myseed,num_epoch,accuracy_score(y_true, y_pred),precision_score(y_true, y_pred),recall_score(y_true, y_pred),f1_score(y_true, y_pred)]
+        alist = ['bert13',myseed,num_epoch,accuracy_score(y_true, y_pred),precision_score(y_true, y_pred),recall_score(y_true, y_pred),f1_score(y_true, y_pred)]
         result.loc[len(result)]=alist
         num_epoch = num_epoch+1
         #result.append({'f1':f1_score(y_true, y_pred)}, ignore_index=True)
@@ -321,6 +363,7 @@ result.to_csv('results.txt', sep='\t', index=False)
 trainer.evaluate()
 
 #model.save_pretrained("./model/%s-%sepoch" % ('distilbert', 20))
+'''
 
 res = trainer.predict(test_dataset) #.metrics["test_f1"]
 y_pred, y_true = align_predictions(res.predictions,res.label_ids)
@@ -338,5 +381,4 @@ print(test['prediction'].value_counts())
 print(res.metrics["test_f1"])
 test.to_csv('test2.txt', sep='\t', index=False)
 
-result.to_csv('results.txt', sep='\t', index=False)
-'''
+#result.to_csv('results.txt', sep='\t', index=False)
