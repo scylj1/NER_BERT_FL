@@ -2,9 +2,13 @@ import pandas as pd
 import numpy as np
 result = 'res.txt'
 res = pd.read_table(result, header=None, names=['model',	'seed',	'epoch',	'acc',	'pre',	'rec',	'f1']).dropna()
-res_an = pd.read_table('res_an.txt', header=None, names=['model',	'epoch',	'acc',	'pre',	'rec',	'f1']).dropna()
+res_an = pd.read_table('res_an.txt', header=None, names=['model',	'epoch',	'acc',	'pre',	'rec',	'f1', 'stdacc','stdpre','stdrec','stdf1']).dropna()
 
-models = ['bert', 'bertfocal','bert_weight', 'bertfocal_weight','bert13','bertfocal13']
+def stdfunc(list1):
+    std=(sum((i-(sum(list1)/len(list1)))**2 for i in list1)/len(list1))**0.5
+    return std
+
+models = ['bert', 'bertfocal','bert_weight', 'bertfocal_weight','bert13','bertfocal13','distilbert']
 for model in models:
     m_index = res['model']==model 
     #print(m_index)
@@ -14,17 +18,18 @@ for model in models:
         e_index = m['epoch'] == str(epoch)
         e = m[e_index]
         #print(e)
-        acc = 0
-        pre=0;rec=0;f1=0
+        acc = []; pre=[];rec=[];f1=[]
         for index,row in e.iterrows():
             #print(row)
             #print(row['acc'])
-            acc = acc+float(row['acc'])
-            pre = pre+float(row['pre'])
-            rec = rec+float(row['rec'])
-            f1 = f1+float(row['f1'])
+            acc.append(float(row['acc']))
+            pre.append(float(row['pre']))
+            rec.append(float(row['rec']))
+            f1.append(float(row['f1']))
 
-        alist = [model, epoch, acc/5, pre/5, rec/5, f1/5]
+        std=(sum((i-(sum(f1)/len(f1)))**2 for i in f1)/len(f1))**0.5
+        alist = [model, epoch, sum(acc)/len(acc), sum(pre)/len(pre), sum(rec)/len(rec), sum(f1)/len(f1), stdfunc(acc), stdfunc(pre), stdfunc(rec), stdfunc(f1)]
         res_an.loc[len(res_an)]=alist
 
 res_an.to_csv('res_an.txt', sep='\t', index=False)
+print('finished')
