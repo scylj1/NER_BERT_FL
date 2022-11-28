@@ -8,7 +8,7 @@ import pandas as pd
 bert = pd.read_table('val_result/bert.txt', header=None, names=['token','label', 'bio_only', 'upos', 'prediction']).dropna()
 weight = pd.read_table('val_result/bert_weight.txt', header=None, names=['token','label', 'bio_only', 'upos', 'prediction']).dropna()
 focal = pd.read_table('val_result/bert_focal.txt', header=None, names=['token','label', 'bio_only', 'upos', 'prediction']).dropna()
-
+test = pd.read_table('test_result/test_result.txt', header=None, names=['token','label', 'bio_only', 'upos', 'prediction']).dropna()
 
 # Evaluation
 # The code is copy from 'Task 2' notebook
@@ -44,7 +44,8 @@ def wnut_evaluate(txt):
   print('Precision = %.3f, Recall = %.3f, F1 = %.3f' % (prec, rec, f1))
 
 print('New evaluation:')
-wnut_evaluate(bert)
-wnut_evaluate(weight)
-wnut_evaluate(focal)
+#wnut_evaluate(bert)
+#wnut_evaluate(weight)
+#wnut_evaluate(focal)
+wnut_evaluate(test)
 

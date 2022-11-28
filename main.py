@@ -57,7 +57,7 @@ def tokens2sequences(txt_in, istest=False):
             ['token']].agg(lambda x: list(x))
     else:  # the dev and training sets do have labels
         txt_seqs = txt.groupby(['sequence_num'], as_index=False)[
-            ['token', 'bio_only']].agg(lambda x: list(x))
+            ['token', 'label']].agg(lambda x: list(x))
     return txt_seqs
 
 print("Change tokens to sequences")
@@ -71,7 +71,7 @@ def read_wnut(file):
     tag_docs = []
     for num in range(len(file['sequence_num'])):
         token_docs.append(file['token'][num])
-        tag_docs.append(file['bio_only'][num])
+        tag_docs.append(file['label'][num])
     return token_docs, tag_docs
 
 train_texts, train_tags = read_wnut(train_seqs)
@@ -219,7 +219,7 @@ class FocalLoss(nn.Module):
 # model training
 epoch = 10
 myseeds = [3407]  # , 42, 522, 227, 2]
-mygamma=1.5
+mygamma=2
 
 for myseed in myseeds:
     num_epoch = 1   
@@ -258,10 +258,9 @@ for myseed in myseeds:
         # print(y_true[0:10])
         global num_epoch
         #alist = ['bert13', myseed, num_epoch, accuracy_score(y_true, y_pred), precision_score(y_true, y_pred), recall_score(y_true, y_pred), f1_score(y_true, y_pred)]
-        alist = ['focal3407', mygamma, num_epoch, accuracy_score(y_true, y_pred), precision_score(
-            y_true, y_pred), recall_score(y_true, y_pred), f1_score(y_true, y_pred)]
+        #alist = ['focal3407', mygamma, num_epoch, accuracy_score(y_true, y_pred), precision_score( y_true, y_pred), recall_score(y_true, y_pred), f1_score(y_true, y_pred)]
         #result.loc[len(result)] = alist
-        hyperp.loc[len(hyperp)] = alist
+        #hyperp.loc[len(hyperp)] = alist
         num_epoch = num_epoch+1
         #result.append({'f1':f1_score(y_true, y_pred)}, ignore_index=True)
         return {"accuracy": accuracy_score(y_true, y_pred), "precision": precision_score(y_true, y_pred), 
@@ -301,7 +300,7 @@ for myseed in myseeds:
 #result.to_csv('./val_result/results.txt', sep='\t', index=False)
 #trainer.evaluate()
 model.save_pretrained("./model/%s-%sepoch" % ('bert1.5', 10))
-hyperp.to_csv('./val_result/gamma.txt', sep='\t', index=False)
+#hyperp.to_csv('./val_result/gamma.txt', sep='\t', index=False)
 
 res = trainer.predict(test_dataset) 
 y_pred, y_true = align_predictions(res.predictions, res.label_ids)
@@ -315,7 +314,7 @@ test['prediction'] = bio_preds
 print(test.describe())
 print(test['prediction'].value_counts())
 print(res.metrics["test_f1"])
-test.to_csv('./test_result/test_result.txt', sep='\t', index=False)
+test.to_csv('./test_result/test_result13.txt', sep='\t', index=False)
 #result.to_csv('./val_result/results.txt', sep='\t', index=False)
 
 '''
